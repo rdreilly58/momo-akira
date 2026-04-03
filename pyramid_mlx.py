@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """PyramidSD 3-model speculative decoding on Apple Silicon using MLX.
 
-Memory-efficient implementation using KV caches (mutated in-place by MLX).
+Simple correct implementation: draft uses KV cache for sequential generation,
+verifiers do full-context forward passes (no cache) for correctness.
+This is slower than a fully-cached version but guaranteed correct.
+
 Draft (0.5B) → Qualifier (1.5B) → Target (7B), all 4-bit quantized.
 """
 
@@ -9,10 +12,10 @@ import time
 import mlx.core as mx
 from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache
+import mlx.nn as nn
 
 
 def load_models():
-    """Load all three models."""
     print("[pyramid] Loading draft (0.5B)...")
     draft, tok = load("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
     print("[pyramid] Loading qualifier (1.5B)...")
@@ -23,152 +26,191 @@ def load_models():
     return draft, qual, tgt, tok
 
 
-def generate_pyramid(draft, qual, target, tokenizer, prompt,
-                     max_tokens=100, l_d=3, l_q=6, tau_q=0.3, tau_t=0.4):
-    """Full PyramidSD generation with KV caching."""
-
+def generate_baseline(model, tokenizer, prompt, max_tokens=100):
+    """Simple autoregressive baseline for speed comparison."""
     messages = [{"role": "user", "content": prompt}]
     formatted = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    ids = tokenizer.encode(formatted)
+    input_ids = mx.array([ids])
+
+    cache = make_prompt_cache(model)
+    logits = model(input_ids, cache=cache)
+    mx.eval(cache[0].keys)
+
+    output = []
+    eos = tokenizer.eos_token_id
+    t0 = time.perf_counter()
+
+    for _ in range(max_tokens):
+        next_tok = mx.argmax(logits[0, -1, :]).item()
+        if next_tok == eos:
+            break
+        output.append(next_tok)
+        logits = model(mx.array([[next_tok]]), cache=cache)
+
+    elapsed = time.perf_counter() - t0
+    return {
+        "text": tokenizer.decode(output),
+        "tokens": len(output),
+        "tps": round(len(output) / elapsed, 1) if elapsed > 0 else 0,
+        "elapsed_s": round(elapsed, 2),
+    }
+
+
+def generate_pyramid(draft, qual, target, tokenizer, prompt,
+                     max_tokens=100, l_d=3, l_q=6, tau_q=0.3, tau_t=0.4):
+    """PyramidSD with correct cache handling.
+    
+    Strategy:
+    - Draft: uses KV cache for fast sequential token generation
+    - Qualifier: full-context forward pass (no cache, guarantees correctness)
+    - Target: full-context forward pass (no cache, guarantees correctness)
+    
+    On rejection: draft cache is rebuilt from scratch (simple & correct).
+    """
+
+    messages = [{"role": "user", "content": prompt}]
+    formatted = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
     prompt_ids = tokenizer.encode(formatted)
-    input_ids = mx.array([prompt_ids])
-
-    # Create KV caches for all 3 models
-    d_cache = make_prompt_cache(draft)
-    q_cache = make_prompt_cache(qual)
-    t_cache = make_prompt_cache(target)
-
-    # Prime caches with prompt (each model processes the prompt once)
-    draft(input_ids, cache=d_cache)
-    qual(input_ids, cache=q_cache)
-    target(input_ids, cache=t_cache)
-    mx.eval(d_cache[0].keys)  # force evaluation
 
     output_ids = []
     eos_id = tokenizer.eos_token_id
-    stats = {"draft_proposed": 0, "draft_accepted": 0, "qual_proposed": 0, "qual_accepted": 0}
-
+    stats = {"d_proposed": 0, "d_accepted": 0, "q_proposed": 0, "q_accepted": 0, "iters": 0}
     t0 = time.perf_counter()
 
-    # We need to track what tokens each cache has seen.
-    # After priming, all caches are synced to the prompt.
-    # As we generate, we need to keep them in sync.
-
     while len(output_ids) < max_tokens:
-        # ============================================================
+        stats["iters"] += 1
+
+        # Build the committed context: prompt + all accepted output so far
+        context_ids = prompt_ids + output_ids
+
+        # ================================================================
         # STAGE 1: Draft → Qualifier
-        # Draft proposes l_d tokens, qualifier verifies in one pass.
-        # Repeat until l_q tokens accumulated.
-        # ============================================================
-        q_buffer = []       # qualifier-approved token IDs
-        q_logits_buf = []   # qualifier logits at each approved position
+        # ================================================================
+        q_buffer = []
+        q_logits_buf = []
+
+        # Rebuild draft cache from committed context
+        d_cache = make_prompt_cache(draft)
+        ctx_tensor = mx.array([context_ids])
+        d_logits = draft(ctx_tensor, cache=d_cache)
+        mx.eval(d_cache[0].keys)
+        last_logits = d_logits[0, -1, :]  # predicts first new token
 
         while len(q_buffer) < l_q and len(output_ids) + len(q_buffer) < max_tokens:
+
             # 1a. Draft generates l_d tokens using its cache
             draft_tokens = []
-            draft_token_logits = []  # logit value the draft assigned to each token
+            draft_logit_vals = []
+            draft_logits_vecs = []  # full logit vectors for softmax
 
-            # The draft cache is already primed. Feed tokens one at a time.
             for step in range(l_d):
-                if step == 0 and not output_ids and not q_buffer:
-                    # First token after prompt — draft cache already has prompt
-                    # We need the logits from the last prompt position
-                    # Re-run last token to get logits (cache already has everything)
-                    last_tok = mx.array([[prompt_ids[-1]]])
-                    # Actually, the cache is already primed, so we need to generate
-                    # the NEXT token. We do this by passing a dummy — but the cache
-                    # already consumed the prompt. Just generate from current state.
-                    pass
-
-                # For the draft, we feed the last generated token (or nothing for first)
                 if step == 0:
-                    if q_buffer:
-                        feed = mx.array([[q_buffer[-1]]])
-                    elif output_ids:
-                        feed = mx.array([[output_ids[-1]]])
-                    else:
-                        # First token ever — we need to get the first prediction
-                        # Cache has the prompt, so feeding any token would advance it.
-                        # Instead, let's get logits from the prompt processing.
-                        # We already primed, so let's just do a forward on the last token again.
-                        # Actually, let's handle this differently...
-                        feed = mx.array([[prompt_ids[-1]]])
+                    logits_vec = last_logits
                 else:
-                    feed = mx.array([[draft_tokens[-1]]])
+                    sl = draft(mx.array([[draft_tokens[-1]]]), cache=d_cache)
+                    logits_vec = sl[0, -1, :]
 
-                logits = draft(feed, cache=d_cache)
-                next_logits = logits[0, -1, :]  # (vocab,)
-                next_token = mx.argmax(next_logits).item()
+                next_tok = mx.argmax(logits_vec).item()
+                draft_tokens.append(next_tok)
+                draft_logit_vals.append(logits_vec[next_tok].item())
+                draft_logits_vecs.append(logits_vec)
 
-                draft_tokens.append(next_token)
-                draft_token_logits.append(next_logits[next_token].item())
+            # Feed last draft token to keep cache consistent
+            draft(mx.array([[draft_tokens[-1]]]), cache=d_cache)
 
-            stats["draft_proposed"] += l_d
+            stats["d_proposed"] += l_d
 
-            # 1b. Qualifier verifies all l_d tokens in one pass
-            candidate = mx.array([draft_tokens])
-            q_logits = qual(candidate, cache=q_cache)  # (1, l_d, vocab)
+            # 1b. Qualifier: full context + q_buffer + candidates in ONE pass
+            full_seq = context_ids + q_buffer + draft_tokens
+            full_tensor = mx.array([full_seq])
+            q_all_logits = qual(full_tensor)  # no cache — full context
+            mx.eval(q_all_logits)
 
-            # 1c. Accept/reject per token
+            # Qualifier logits for candidates start at position len(context_ids + q_buffer) - 1
+            # because logit at position i predicts token at position i+1
+            base_pos = len(context_ids) + len(q_buffer) - 1
+
+            # 1c. Accept/reject using softmax probabilities
             n_acc = 0
             for i in range(l_d):
-                d_val = draft_token_logits[i]
-                q_val = q_logits[0, i, draft_tokens[i]].item()
+                d_probs = mx.softmax(draft_logits_vecs[i])
+                q_probs = mx.softmax(q_all_logits[0, base_pos + i, :])
+                d_val = d_probs[draft_tokens[i]].item()
+                q_val = q_probs[draft_tokens[i]].item()
 
                 if abs(q_val - d_val) <= tau_q:
                     q_buffer.append(draft_tokens[i])
-                    q_logits_buf.append(q_logits[0, i, :])
+                    q_logits_buf.append(q_probs)
                     n_acc += 1
                 else:
-                    # PSDA: replace with qualifier's choice
-                    replacement = mx.argmax(q_logits[0, i, :]).item()
+                    replacement = mx.argmax(q_probs).item()
                     q_buffer.append(replacement)
-                    q_logits_buf.append(q_logits[0, i, :])
+                    q_logits_buf.append(q_probs)
                     break
 
-            stats["draft_accepted"] += n_acc
+            stats["d_accepted"] += n_acc
 
-            # Clean up draft logits
-            del q_logits
+            del q_all_logits
             mx.eval()
 
-            # EOS check
-            if eos_id in q_buffer[-n_acc - 1:] if n_acc < l_d else q_buffer[-n_acc:]:
+            # Rebuild draft cache to: context + accepted q_buffer
+            d_cache = make_prompt_cache(draft)
+            new_ctx = mx.array([context_ids + q_buffer])
+            d_logits = draft(new_ctx, cache=d_cache)
+            mx.eval(d_cache[0].keys)
+            last_logits = d_logits[0, -1, :]
+
+            if eos_id is not None and eos_id in q_buffer:
                 break
 
         if not q_buffer:
             break
 
-        # ============================================================
+        # ================================================================
         # STAGE 2: Qualifier buffer → Target
-        # Target verifies all buffer tokens in one pass.
-        # ============================================================
-        stats["qual_proposed"] += len(q_buffer)
+        # Full context forward pass — no cache.
+        # Compare P_T vs P_Q (paper's key insight).
+        # ================================================================
+        stats["q_proposed"] += len(q_buffer)
 
-        buf_ids = mx.array([q_buffer])
-        t_logits = target(buf_ids, cache=t_cache)  # (1, len(q_buffer), vocab)
+        full_seq = context_ids + q_buffer
+        full_tensor = mx.array([full_seq])
+        t_all_logits = target(full_tensor)  # no cache — full context
+        mx.eval(t_all_logits)
+
+        base_pos = len(context_ids) - 1
 
         final = []
         for i in range(len(q_buffer)):
-            t_val = t_logits[0, i, q_buffer[i]].item()
+            t_probs = mx.softmax(t_all_logits[0, base_pos + i, :])
+            t_val = t_probs[q_buffer[i]].item()
             q_val = q_logits_buf[i][q_buffer[i]].item()
 
             if abs(t_val - q_val) <= tau_t:
                 final.append(q_buffer[i])
             else:
-                replacement = mx.argmax(t_logits[0, i, :]).item()
+                replacement = mx.argmax(t_probs).item()
                 final.append(replacement)
                 break
 
-        stats["qual_accepted"] += len(final)
+        stats["q_accepted"] += len(final)
 
-        del t_logits, q_logits_buf
+        del t_all_logits, q_logits_buf
         mx.eval()
 
-        # Append to output
+        # Append accepted tokens
+        eos_hit = False
         for t in final:
             if t == eos_id:
+                eos_hit = True
                 break
             output_ids.append(t)
+
+        if eos_hit:
+            break
 
     elapsed = time.perf_counter() - t0
     text = tokenizer.decode(output_ids)
@@ -180,8 +222,8 @@ def generate_pyramid(draft, qual, target, tokenizer, prompt,
         "tps": round(tps, 1),
         "elapsed_s": round(elapsed, 2),
         "stats": stats,
-        "draft_accept_rate": round(stats["draft_accepted"] / max(stats["draft_proposed"], 1), 3),
-        "qual_accept_rate": round(stats["qual_accepted"] / max(stats["qual_proposed"], 1), 3),
+        "draft_accept_rate": round(stats["d_accepted"] / max(stats["d_proposed"], 1), 3),
+        "qual_accept_rate": round(stats["q_accepted"] / max(stats["q_proposed"], 1), 3),
     }
 
 
@@ -192,11 +234,22 @@ if __name__ == "__main__":
     draft, qual, tgt, tok = load_models()
     print(f"Peak memory after load: {mx.get_peak_memory() / 1e9:.2f} GB")
 
-    result = generate_pyramid(draft, qual, tgt, tok, prompt, max_tokens=100, l_d=3, l_q=6)
+    # Baseline
+    print("\n=== BASELINE (7B only) ===")
+    base = generate_baseline(tgt, tok, prompt, max_tokens=100)
+    print(f"Output: {base['text'][:200]}...")
+    print(f"Speed: {base['tps']} tok/s | Time: {base['elapsed_s']}s")
 
-    print(f"\n--- Output ---\n{result['text']}")
+    # PyramidSD
+    print("\n=== PYRAMID SD (0.5B → 1.5B → 7B) ===")
+    result = generate_pyramid(draft, qual, tgt, tok, prompt, max_tokens=100, l_d=3, l_q=6)
+    print(f"Output: {result['text'][:200]}...")
     print(f"\n--- Metrics ---")
     print(f"Tokens: {result['tokens']} | Speed: {result['tps']} tok/s | Time: {result['elapsed_s']}s")
     print(f"Draft accept: {result['draft_accept_rate']} | Qualifier accept: {result['qual_accept_rate']}")
     print(f"Stats: {result['stats']}")
     print(f"Peak memory: {mx.get_peak_memory() / 1e9:.2f} GB")
+
+    # Speedup
+    if base['tps'] > 0:
+        print(f"\nSpeedup: {result['tps'] / base['tps']:.2f}x vs baseline")
