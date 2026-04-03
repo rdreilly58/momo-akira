@@ -1,0 +1,124 @@
+# openclaw-speculative-decoder configuration
+# This file is the SINGLE SOURCE OF TRUTH for model selection.
+# Swap any model by changing its model_id here — zero code changes required.
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+server:
+  host: "127.0.0.1"
+  port: 7780
+  log_level: "info"
+  request_timeout_s: 120
+
+# ---------------------------------------------------------------------------
+# Models — three tiers
+# Each tier has the same schema; swap any tier by changing model_id/provider.
+# Supported providers: anthropic, openai, openrouter
+# ---------------------------------------------------------------------------
+models:
+  draft:
+    model_id: "claude-haiku-4-5-20251001"
+    provider: "anthropic"
+    cost_per_1k_input: 0.00025    # USD
+    cost_per_1k_output: 0.00125
+    expected_latency_ms: 800
+    timeout_s: 15
+
+  qualifier:
+    model_id: "claude-sonnet-4-6"
+    provider: "anthropic"
+    cost_per_1k_input: 0.003
+    cost_per_1k_output: 0.015
+    expected_latency_ms: 2000
+    timeout_s: 30
+
+  target:
+    model_id: "claude-opus-4-6"
+    provider: "anthropic"
+    cost_per_1k_input: 0.015
+    cost_per_1k_output: 0.075
+    expected_latency_ms: 5000
+    timeout_s: 60
+
+# ---------------------------------------------------------------------------
+# Cascade algorithm
+# variant: psda (Assisted — stable, default) or psdf (Fuzzy — faster)
+# tau_Q, tau_T: confidence thresholds in [0.0, 1.0]
+#   tau_Q <= tau_T recommended (paper Section 4)
+#   Higher value = stricter = more escalations to next tier
+# ---------------------------------------------------------------------------
+cascade:
+  variant: "psda"          # "psda" or "psdf"
+  tau_q: 0.35              # draft → qualifier threshold
+  tau_t: 0.50              # qualifier → target threshold
+  speculative_length_d: 4  # paper: l_D (draft speculative length, in sentence units)
+  speculative_length_q: 8  # paper: l_Q (qualifier speculative length)
+
+# ---------------------------------------------------------------------------
+# Confidence scoring — weights for composite confidence C ∈ [0,1]
+# These weights are summed and normalized.
+# ---------------------------------------------------------------------------
+confidence:
+  # Weight given to prompt complexity analysis (inverse complexity → high confidence)
+  prompt_complexity_weight: 0.30
+  # Weight given to response coherence (grammar, structure, completeness)
+  response_coherence_weight: 0.40
+  # Weight given to logprob-based scoring (only for providers that expose logprobs)
+  logprob_weight: 0.30
+  # Whether to request logprobs from providers that support it (OpenAI)
+  use_logprobs: true
+  # Whether to use a lightweight self-scoring prompt to judge draft quality
+  use_self_scoring: false
+
+# ---------------------------------------------------------------------------
+# Adaptive threshold controller
+# Tunes tau_Q and tau_T at runtime based on measured acceptance rates.
+# Target acceptance rates are the rates at which we want each tier to accept.
+# ---------------------------------------------------------------------------
+adaptive_threshold:
+  enabled: true
+  # How quickly thresholds adapt (exponential moving average alpha)
+  learning_rate: 0.05
+  # Target acceptance rate for draft tier (fraction of requests resolved by draft)
+  target_draft_acceptance: 0.60
+  # Target acceptance rate for qualifier tier (fraction of escalations resolved by qualifier)
+  target_qualifier_acceptance: 0.70
+  # Minimum and maximum bounds for thresholds
+  tau_q_min: 0.10
+  tau_q_max: 0.70
+  tau_t_min: 0.20
+  tau_t_max: 0.85
+  # Only update thresholds after this many requests (warm-up period)
+  warmup_requests: 50
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  # Directory for JSONL request/response logs (daily rotation)
+  log_dir: "./logs"
+  # Enable/disable request logging
+  enabled: true
+  # Include full request/response content in logs (disable for privacy)
+  include_content: true
+  # Maximum log file size before rotation (bytes)
+  max_bytes: 104857600  # 100 MB
+  # Number of rotated log files to keep
+  backup_count: 7
+
+# ---------------------------------------------------------------------------
+# Provider API keys — prefer environment variables over hardcoding here.
+# The proxy reads ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
+# from the environment automatically. These fields are optional overrides.
+# ---------------------------------------------------------------------------
+providers:
+  anthropic:
+    api_key_env: "ANTHROPIC_API_KEY"  # env var name (not the key itself)
+    base_url: null  # null = use provider default
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+    base_url: null
+  openrouter:
+    api_key_env: "OPENROUTER_API_KEY"
+    base_url: "https://openrouter.ai/api/v1"
