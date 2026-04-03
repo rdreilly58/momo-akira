@@ -91,7 +91,7 @@ def _make_verifier_mock(accept_all: bool = True, eos_at: int | None = None) -> M
         past_key_values: Any = None,
     ) -> VerifierOutput:
         logits = torch.stack([_constant_logits(t, value=1.0) for t in candidate_ids])
-        return VerifierOutput(logits=logits, past_key_values=())  # type: ignore[arg-type]
+        return VerifierOutput(logits=logits)
 
     mock = MagicMock()
     mock.verify.side_effect = side_effect

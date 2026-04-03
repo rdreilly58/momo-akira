@@ -91,8 +91,8 @@ def create_app(cfg: Config) -> FastAPI:
         if req.stream:
             raise HTTPException(status_code=400, detail="Streaming not yet supported")
 
-        # Build prompt from messages (simple concatenation; swap for proper templates)
-        prompt = _messages_to_prompt(req.messages)
+        # Build prompt using the tokenizer's chat template when available.
+        prompt = _messages_to_prompt(req.messages, tokenizer=engine.tokenizer)
 
         # Override config params if caller specified them
         if req.temperature is not None:
@@ -143,14 +143,22 @@ def create_app(cfg: Config) -> FastAPI:
 # ---------------------------------------------------------------------------
 
 
-def _messages_to_prompt(messages: list[ChatMessage]) -> str:
-    """Convert a chat message list to a plain prompt string.
+def _messages_to_prompt(
+    messages: list[ChatMessage],
+    tokenizer: object | None = None,
+) -> str:
+    """Convert a chat message list to a prompt string.
 
-    For Qwen/Llama instruct models the correct approach is to use the
-    tokenizer's apply_chat_template().  The engine calls tokenizer.encode()
-    on this string directly, so here we produce a reasonable plain-text
-    representation that most instruct models handle well.
+    Uses the tokenizer's apply_chat_template() when available (required for
+    Qwen/Llama instruct models to produce correctly formatted prompts).
+    Falls back to a plain-text representation otherwise.
     """
+    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+        chat = [{"role": m.role, "content": m.content} for m in messages]
+        return tokenizer.apply_chat_template(  # type: ignore[union-attr]
+            chat, tokenize=False, add_generation_prompt=True
+        )
+
     parts: list[str] = []
     for msg in messages:
         if msg.role == "system":

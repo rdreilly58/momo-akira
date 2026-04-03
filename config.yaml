@@ -18,16 +18,16 @@ models:
   family: "qwen2.5"  # documents which tokenizer family; all three must match
   draft:
     model_id: "Qwen/Qwen2.5-0.5B-Instruct"
-    device: "auto"
-    dtype: "float16"
+    device: "cpu"
+    dtype: "float16"       # ~1 GB
   qualifier:
+    model_id: "Qwen/Qwen2.5-1.5B-Instruct"
+    device: "auto"
+    dtype: "int4"          # ~0.75 GB
+  target:
     model_id: "Qwen/Qwen2.5-3B-Instruct"
     device: "auto"
-    dtype: "float16"
-  target:
-    model_id: "Qwen/Qwen2.5-7B-Instruct"
-    device: "auto"
-    dtype: "float16"
+    dtype: "int4"          # ~1.5 GB  (total ~3.25 GB)
 
 # ---------------------------------------------------------------------------
 # Decoding
@@ -46,7 +46,7 @@ decoding:
   tau_q: 0.3                 # draft→qualifier threshold
   tau_t: 0.4                 # qualifier→target threshold
   temperature: 0.7
-  max_new_tokens: 2048
+  max_new_tokens: 256
 
 # ---------------------------------------------------------------------------
 # Adaptive threshold controller

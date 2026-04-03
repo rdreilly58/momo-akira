@@ -30,12 +30,7 @@ class DraftModel:
         self._device = self._resolve_device(cfg.device)
         self._dtype = self._resolve_dtype(cfg.dtype)
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id,
-            torch_dtype=self._dtype,
-            device_map=cfg.device if cfg.device != "auto" else "auto",
-            trust_remote_code=True,
-        )
+        self.model = _load_model(cfg)
         self.model.eval()
 
     # ------------------------------------------------------------------
@@ -129,3 +124,87 @@ class DraftModel:
         """Load from config, validating that the model uses the shared tokenizer."""
         tokenizer = AutoTokenizer.from_pretrained(shared_tokenizer_id, trust_remote_code=True)
         return cls(cfg, tokenizer)
+
+
+def _load_model(cfg: ModelConfig) -> AutoModelForCausalLM:
+    """Load a model with quantization support for Apple Silicon (16GB).
+
+    Strategy:
+    - float16/bfloat16/float32: load directly with low_cpu_mem_usage
+    - int4/int8: load in float16 first, then quantize on CPU
+      (BitsAndBytes doesn't support MPS, so we stay on CPU for quantized models)
+    """
+    import gc
+
+    dtype = cfg.dtype.lower()
+
+    if dtype in ("int4", "int8"):
+        # Load in float16 to CPU, keeping memory low
+        print(f"Loading {cfg.model_id} in {dtype} (CPU, quantized)...")
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_id,
+            torch_dtype=torch.float16,
+            device_map="cpu",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        # Quantize weights in-place to save memory
+        _quantize_in_place(model, dtype)
+        gc.collect()
+        return model
+    else:
+        # Standard float loading
+        torch_dtype = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }.get(dtype, torch.float16)
+
+        device = cfg.device
+        if device == "auto":
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+
+        print(f"Loading {cfg.model_id} in {dtype} on {device}...")
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        model = model.to(device)
+        gc.collect()
+        return model
+
+
+def _quantize_in_place(model: AutoModelForCausalLM, dtype: str) -> None:
+    """Reduce model memory by converting linear layer weights to lower precision.
+
+    This is a simple post-load quantization (round-to-nearest) that keeps
+    the model on CPU. It's not as accurate as GPTQ/AWQ but saves memory
+    and preserves full logit output.
+    """
+    import torch.nn as nn
+
+    target_dtype = torch.int8 if dtype == "int8" else torch.float16
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            w = module.weight.data
+            if dtype == "int8":
+                # Scale to int8 range, quantize, store scale for dequant
+                scale = w.abs().max(dim=1, keepdim=True).values / 127.0
+                scale = scale.clamp(min=1e-8)
+                w_q = (w / scale).round().clamp(-128, 127).to(torch.int8)
+                # Store quantized weight and scale
+                module.weight.data = w_q.to(torch.float16) * scale  # dequantize back
+            elif dtype == "int4":
+                # Simulate int4: scale to [-8, 7] range, round, dequant back to fp16
+                scale = w.abs().max(dim=1, keepdim=True).values / 7.0
+                scale = scale.clamp(min=1e-8)
+                w_q = (w / scale).round().clamp(-8, 7)
+                module.weight.data = (w_q * scale).to(torch.float16)

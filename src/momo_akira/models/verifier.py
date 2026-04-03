@@ -38,12 +38,8 @@ class VerifierModel:
         self.cfg = cfg
         self.tokenizer = tokenizer
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id,
-            torch_dtype=self._resolve_dtype(cfg.dtype),
-            device_map=cfg.device if cfg.device != "auto" else "auto",
-            trust_remote_code=True,
-        )
+        from momo_akira.models.draft import _load_model
+        self.model = _load_model(cfg)
         self.model.eval()
 
     # ------------------------------------------------------------------
