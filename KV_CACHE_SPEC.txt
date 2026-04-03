@@ -1,0 +1,83 @@
+You are fixing the performance of `pyramid_mlx.py`, a working but slow implementation of the PyramidSD speculative decoding algorithm.
+
+**Your Goal:** Implement full KV caching for all three models (draft, qualifier, target) using MLX's in-place cache mutation and `trim()` for rollback. This should significantly improve the speed from the current ~1.7 tok/s to something closer to the baseline (~18 tok/s).
+
+**The Current Code (provided as context):**
+The provided `pyramid_mlx.py` works correctly but is slow because it avoids caching for the verifier models, instead doing full-context forward passes on every iteration to guarantee correctness. The draft model's caching is also inefficiently rebuilt from scratch on every loop.
+
+**Your Task is to replace this slow logic with a fully KV-cached implementation.**
+
+---
+
+### **Critical Learnings: The MLX Cache API**
+
+I have tested these APIs. This is how you must interact with them:
+
+1.  **Creation:**
+    ```python
+    from mlx_lm.models.cache import make_prompt_cache
+    cache = make_prompt_cache(model) # Creates an empty list of KVCache layers.
+    ```
+
+2.  **Forward Pass (mutates cache):**
+    ```python
+    logits = model(input_ids, cache=cache)
+    # IMPORTANT: The model call returns ONLY logits.
+    # The `cache` object is mutated in-place and its offset is advanced.
+    ```
+
+3.  **Position Tracking:**
+    ```python
+    offset = cache[0].offset # Gets the number of tokens the cache has consumed.
+    ```
+
+4.  **Rollback (CRITICAL):**
+    ```python
+    def trim_cache(cache, n):
+        for layer in cache:
+            layer.trim(n)
+    # `trim(n)` removes the last `n` tokens from the cache's history.
+    # This is how you implement rollback on rejection. It works.
+    ```
+
+5.  **"Peeking" at Next Logits (CRITICAL):**
+    To get the logits for the *next* token without permanently advancing the cache, you must use a "peek" pattern:
+    ```python
+    def peek_logits(model, token_id, cache):
+        """Gets logits for the position after token_id without advancing the cache."""
+        logits = model(mx.array([[token_id]]), cache=cache) # Cache advances by 1
+        trim_cache(cache, 1) # Immediately undo the advance
+        return logits[0, -1, :]
+    ```
+
+---
+
+### **The Required Algorithm with Caching**
+
+You must rewrite the `generate_pyramid` function to follow this logic:
+
+1.  **Initialization:**
+    *   Create three separate KV caches: `d_cache`, `q_cache`, `t_cache`.
+    *   **Prime all three caches:** Process the initial prompt through each model once to fill their caches. All caches are now synced at `offset = len(prompt_ids)`.
+    *   Capture the `draft_next_logits` from the priming pass (the logits from the last token of the prompt).
+
+2.  **Outer Generation Loop:**
+    *   At the start of the loop, assert that all three caches have the same offset. This is the **cache invariant** and will catch any bugs in your logic.
+    *   **STAGE 1 (Draft -> Qualifier):**
+        *   The draft model generates `l_d` tokens sequentially. Use `draft_next_logits` for the first token, then use the cache for subsequent tokens.
+        *   The qualifier model verifies all `l_d` candidates in a *single* forward pass, using its cache.
+        *   Compare softmax probabilities to accept/reject tokens.
+        *   **Rollback:** After identifying the accepted/replacement tokens, `trim()` the draft and qualifier caches to undo the speculation on the rejected tokens.
+        *   Use the "peek" method to get the `draft_next_logits` for the *next* inner loop iteration.
+    *   **STAGE 2 (Qualifier -> Target):**
+        *   The target model verifies all tokens from the `qualifier_buffer` in a *single* forward pass, using its cache.
+        *   Compare softmax probabilities to get the final accepted tokens.
+        *   **Rollback:** `trim()` all **three** caches (draft, qualifier, and target) to undo the speculation on any tokens the target rejected. All three caches must now be at the new "committed" offset.
+    *   **Loop:** Use the "peek" method again to get the `draft_next_logits` for the next *outer* loop iteration and continue.
+
+3.  **Memory Management:**
+    *   Use `del` on large logit tensors as soon as they are no longer needed.
+    *   Call `mx.eval()` after deletions to force MLX to reclaim memory.
+
+**Final Output:**
+Your final `pyramid_mlx.py` should be a standalone script that, when run, demonstrates a significant speedup over the baseline. The output text must remain correct.
