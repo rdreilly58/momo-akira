@@ -50,8 +50,8 @@ models:
 # ---------------------------------------------------------------------------
 cascade:
   variant: "psda"          # "psda" or "psdf"
-  tau_q: 0.35              # draft → qualifier threshold
-  tau_t: 0.50              # qualifier → target threshold
+  tau_q: 0.85              # draft → qualifier threshold (tightened)
+  tau_t: 0.70              # qualifier → target threshold (tightened)
   speculative_length_d: 4  # paper: l_D (draft speculative length, in sentence units)
   speculative_length_q: 8  # paper: l_Q (qualifier speculative length)
 
