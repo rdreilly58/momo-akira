@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quality validation benchmark: PyramidSD (fuzzy + lossless) vs 7B baseline.
+"""Quality validation benchmark: PyramidSD modes vs 7B baseline.
 
 Usage:
     python benchmark.py           # 50 tokens per prompt
@@ -76,7 +76,6 @@ def bleu2(ref, hyp):
     p2 = ngram_precision(ref, hyp, 2)
     if p1 == 0 or p2 == 0:
         return 0.0
-    # Brevity penalty
     bp = min(1.0, math.exp(1 - len(ref) / max(len(hyp), 1)))
     return bp * math.sqrt(p1 * p2)
 
@@ -95,12 +94,43 @@ def unigram_f1(ref, hyp):
     return 2 * precision * recall / (precision + recall)
 
 
+# ── Mode configurations ──────────────────────────────────────────────────────
+MODES = [
+    {
+        "label": "fuzzy",
+        "short": "Fuzz",
+        "kwargs": {"mode": "fuzzy"},
+    },
+    {
+        "label": "lossless",
+        "short": "Loss",
+        "kwargs": {"mode": "lossless"},
+    },
+    {
+        "label": "fuzzy+tree+adapt",
+        "short": "FzTA",
+        "kwargs": {"mode": "fuzzy", "tree": True, "top_k": 3,
+                   "adaptive": True, "l_d_min": 1, "l_d_max": 8,
+                   "entropy_threshold": 2.0},
+    },
+    {
+        "label": "lossless+tree+adapt",
+        "short": "LsTA",
+        "kwargs": {"mode": "lossless", "tree": True, "top_k": 3,
+                   "adaptive": True, "l_d_min": 1, "l_d_max": 8,
+                   "entropy_threshold": 2.0},
+    },
+]
+
+
 # ── Main benchmark ────────────────────────────────────────────────────────────
 
 def run_benchmark(max_tokens=50):
+    n_modes = len(MODES)
     print("=" * 72)
     print("  PyramidSD Quality Validation Benchmark")
     print(f"  {len(TEST_PROMPTS)} prompts × max_tokens={max_tokens}")
+    print(f"  Modes: baseline + {', '.join(m['label'] for m in MODES)}")
     print("=" * 72)
 
     d, q, t, tok = load_models()
@@ -112,112 +142,126 @@ def run_benchmark(max_tokens=50):
         print(f"  Prompt {idx+1:2d}/{len(TEST_PROMPTS)}: {prompt}")
         print(f"{'─'*60}")
 
-        print("\n[1/3] Baseline (7B autoregressive)")
+        # Baseline
+        print(f"\n[1/{n_modes+1}] Baseline (7B autoregressive)")
         base = generate_baseline(t, tok, prompt, max_tokens=max_tokens)
-
-        print("\n[2/3] PyramidSD – fuzzy mode")
-        fuzzy = generate_pyramid(d, q, t, tok, prompt, max_tokens=max_tokens,
-                                 mode="fuzzy")
-
-        print("\n[3/3] PyramidSD – lossless mode")
-        lossless = generate_pyramid(d, q, t, tok, prompt, max_tokens=max_tokens,
-                                    mode="lossless")
-
         b = base["tokens"]
-        f = fuzzy["tokens"]
-        ls = lossless["tokens"]
 
         r = {
-            "prompt":           prompt,
-            # Speed
-            "base_tok_s":       base["tok_s"],
-            "fuzzy_tok_s":      fuzzy["tok_s"],
-            "lossless_tok_s":   lossless["tok_s"],
-            # Fuzzy quality vs baseline
-            "f_match":          token_match_rate(b, f),
-            "f_bleu2":          bleu2(b, f),
-            "f_f1":             unigram_f1(b, f),
-            # Lossless quality vs baseline
-            "l_match":          token_match_rate(b, ls),
-            "l_bleu2":          bleu2(b, ls),
-            "l_f1":             unigram_f1(b, ls),
-            # Acceptance rates
-            "f_d_acc":          fuzzy["d_accept_rate"],
-            "f_q_acc":          fuzzy["q_accept_rate"],
-            "l_d_acc":          lossless["d_accept_rate"],
-            "l_q_acc":          lossless["q_accept_rate"],
-            # Output lengths
-            "base_len":         len(b),
-            "fuzzy_len":        len(f),
-            "lossless_len":     len(ls),
+            "prompt": prompt,
+            "base_tok_s": base["tok_s"],
         }
+
+        # Run each mode
+        mode_results = {}
+        for mi, m in enumerate(MODES):
+            print(f"\n[{mi+2}/{n_modes+1}] PyramidSD – {m['label']}")
+            res = generate_pyramid(d, q, t, tok, prompt,
+                                   max_tokens=max_tokens, **m["kwargs"])
+            h = res["tokens"]
+            prefix = m["short"].lower()
+            r[f"{prefix}_tok_s"] = res["tok_s"]
+            r[f"{prefix}_match"] = token_match_rate(b, h)
+            r[f"{prefix}_bleu2"] = bleu2(b, h)
+            r[f"{prefix}_f1"] = unigram_f1(b, h)
+            r[f"{prefix}_d_acc"] = res["d_accept_rate"]
+            r[f"{prefix}_q_acc"] = res["q_accept_rate"]
+            r[f"{prefix}_tree_saves"] = res.get("tree_saves", 0)
+            r[f"{prefix}_avg_dl"] = res.get("avg_draft_len", 0)
+            mode_results[m["short"]] = res
+
         results.append(r)
 
-        # Per-prompt quick summary
-        print(f"\n  Speed  — base:{r['base_tok_s']:.1f}  fuzzy:{r['fuzzy_tok_s']:.1f}"
-              f"  lossless:{r['lossless_tok_s']:.1f} tok/s")
-        print(f"  Fuzzy  — match:{r['f_match']:.3f}  BLEU-2:{r['f_bleu2']:.3f}"
-              f"  F1:{r['f_f1']:.3f}")
-        print(f"  Lossless — match:{r['l_match']:.3f}  BLEU-2:{r['l_bleu2']:.3f}"
-              f"  F1:{r['l_f1']:.3f}")
+        # Per-prompt summary
+        print(f"\n  Speed — base:{r['base_tok_s']:.1f}", end="")
+        for m in MODES:
+            p = m["short"].lower()
+            print(f"  {m['short']}:{r[f'{p}_tok_s']:.1f}", end="")
+        print(" tok/s")
+        for m in MODES:
+            p = m["short"].lower()
+            print(f"  {m['label']:22s} — match:{r[f'{p}_match']:.3f}"
+                  f"  BLEU-2:{r[f'{p}_bleu2']:.3f}  F1:{r[f'{p}_f1']:.3f}")
 
     # ── Aggregate summary table ───────────────────────────────────────────────
-    print("\n\n" + "=" * 96)
-    print("  BENCHMARK SUMMARY TABLE")
-    print("=" * 96)
-    hdr = (f"{'#':>2}  {'Prompt':<36}  "
-           f"{'Base':>5} {'Fuzz':>5} {'Loss':>5}  "
-           f"{'F-mat':>5} {'F-bl2':>5} {'F-f1':>5}  "
-           f"{'L-mat':>5} {'L-bl2':>5} {'L-f1':>5}")
-    sub = (f"{'':>2}  {'':36}  "
-           f"{'tok/s':>5} {'tok/s':>5} {'tok/s':>5}  "
-           f"{'rate':>5} {'score':>5} {'score':>5}  "
-           f"{'rate':>5} {'score':>5} {'score':>5}")
-    print(hdr)
-    print(sub)
-    print("─" * 96)
-
-    for i, r in enumerate(results):
-        p = r["prompt"][:35]
-        print(f"{i+1:>2}  {p:<36}  "
-              f"{r['base_tok_s']:>5.1f} {r['fuzzy_tok_s']:>5.1f} {r['lossless_tok_s']:>5.1f}  "
-              f"{r['f_match']:>5.3f} {r['f_bleu2']:>5.3f} {r['f_f1']:>5.3f}  "
-              f"{r['l_match']:>5.3f} {r['l_bleu2']:>5.3f} {r['l_f1']:>5.3f}")
-
-    print("─" * 96)
     n = len(results)
     avg = lambda k: sum(r[k] for r in results) / n
-    print(f"{'AVG':>2}  {'':36}  "
-          f"{avg('base_tok_s'):>5.1f} {avg('fuzzy_tok_s'):>5.1f} {avg('lossless_tok_s'):>5.1f}  "
-          f"{avg('f_match'):>5.3f} {avg('f_bleu2'):>5.3f} {avg('f_f1'):>5.3f}  "
-          f"{avg('l_match'):>5.3f} {avg('l_bleu2'):>5.3f} {avg('l_f1'):>5.3f}")
 
+    col_w = 6
+    mode_shorts = [m["short"] for m in MODES]
+
+    print("\n\n" + "=" * 120)
+    print("  BENCHMARK SUMMARY TABLE")
+    print("=" * 120)
+
+    # Header
+    hdr = f"{'#':>2}  {'Prompt':<32}  {'Base':>{col_w}}"
+    for s in mode_shorts:
+        hdr += f" {s:>{col_w}}"
+    hdr += "  "
+    for s in mode_shorts:
+        hdr += f" {s[:4]+'M':>{col_w}}"
+    print(hdr)
+
+    sub = f"{'':>2}  {'':32}  {'tok/s':>{col_w}}"
+    for _ in mode_shorts:
+        sub += f" {'tok/s':>{col_w}}"
+    sub += "  "
+    for _ in mode_shorts:
+        sub += f" {'match':>{col_w}}"
+    print(sub)
+    print("─" * 120)
+
+    for i, r in enumerate(results):
+        p = r["prompt"][:31]
+        line = f"{i+1:>2}  {p:<32}  {r['base_tok_s']:>{col_w}.1f}"
+        for s in mode_shorts:
+            k = f"{s.lower()}_tok_s"
+            line += f" {r[k]:>{col_w}.1f}"
+        line += "  "
+        for s in mode_shorts:
+            k = f"{s.lower()}_match"
+            line += f" {r[k]:>{col_w}.3f}"
+        print(line)
+
+    print("─" * 120)
+    line = f"{'AVG':>2}  {'':32}  {avg('base_tok_s'):>{col_w}.1f}"
+    for s in mode_shorts:
+        line += f" {avg(f'{s.lower()}_tok_s'):>{col_w}.1f}"
+    line += "  "
+    for s in mode_shorts:
+        line += f" {avg(f'{s.lower()}_match'):>{col_w}.3f}"
+    print(line)
+
+    # ── Aggregate metrics ─────────────────────────────────────────────────────
     print("\n" + "=" * 72)
     print("  AGGREGATE METRICS")
     print("=" * 72)
 
-    base_avg  = avg("base_tok_s")
-    fuzzy_avg = avg("fuzzy_tok_s")
-    loss_avg  = avg("lossless_tok_s")
+    base_avg = avg("base_tok_s")
 
     print(f"  Speed")
-    print(f"    Baseline:         {base_avg:>6.1f} tok/s")
-    print(f"    Fuzzy:            {fuzzy_avg:>6.1f} tok/s  ({fuzzy_avg/base_avg:.2f}x speedup)")
-    print(f"    Lossless:         {loss_avg:>6.1f} tok/s  ({loss_avg/base_avg:.2f}x speedup)")
+    print(f"    Baseline:              {base_avg:>6.1f} tok/s")
+    for m in MODES:
+        p = m["short"].lower()
+        m_avg = avg(f"{p}_tok_s")
+        print(f"    {m['label']:22s} {m_avg:>6.1f} tok/s  "
+              f"({m_avg/base_avg:.2f}x)")
 
-    print(f"\n  Quality vs Baseline (Fuzzy mode)")
-    print(f"    Exact match rate: {avg('f_match'):>6.3f}")
-    print(f"    BLEU-2:           {avg('f_bleu2'):>6.3f}")
-    print(f"    Unigram F1:       {avg('f_f1'):>6.3f}")
-    print(f"    Draft accept:     {avg('f_d_acc'):>6.1%}")
-    print(f"    Qualifier accept: {avg('f_q_acc'):>6.1%}")
-
-    print(f"\n  Quality vs Baseline (Lossless mode)")
-    print(f"    Exact match rate: {avg('l_match'):>6.3f}")
-    print(f"    BLEU-2:           {avg('l_bleu2'):>6.3f}")
-    print(f"    Unigram F1:       {avg('l_f1'):>6.3f}")
-    print(f"    Draft accept:     {avg('l_d_acc'):>6.1%}")
-    print(f"    Qualifier accept: {avg('l_q_acc'):>6.1%}")
+    for m in MODES:
+        p = m["short"].lower()
+        print(f"\n  Quality vs Baseline ({m['label']})")
+        print(f"    Exact match rate: {avg(f'{p}_match'):>6.3f}")
+        print(f"    BLEU-2:           {avg(f'{p}_bleu2'):>6.3f}")
+        print(f"    Unigram F1:       {avg(f'{p}_f1'):>6.3f}")
+        print(f"    Draft accept:     {avg(f'{p}_d_acc'):>6.1%}")
+        print(f"    Qualifier accept: {avg(f'{p}_q_acc'):>6.1%}")
+        ts = avg(f'{p}_tree_saves')
+        dl = avg(f'{p}_avg_dl')
+        if ts > 0:
+            print(f"    Tree saves:       {ts:>6.1f} avg/prompt")
+        if dl > 0:
+            print(f"    Avg draft length: {dl:>6.1f}")
 
     print()
 

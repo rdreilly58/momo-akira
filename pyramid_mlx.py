@@ -69,15 +69,38 @@ def generate_baseline(t_model, tokenizer, prompt, max_tokens=100, verbose=True):
     }
 
 
+def _compute_entropy(logits):
+    """Entropy of softmax(logits). High entropy = uncertain draft.
+    Casts to float32 to avoid NaN from float16 overflow."""
+    logits32 = logits.astype(mx.float32)
+    probs = mx.softmax(logits32)
+    return -mx.sum(probs * mx.log(mx.clip(probs, 1e-10, 1.0))).item()
+
+
 def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
                      max_tokens=100, l_d=3, l_q=6, tau_q=0.3, tau_t=0.4,
-                     mode="fuzzy", verbose=True):
+                     mode="fuzzy", verbose=True,
+                     # 2a: Tree speculation (multi-candidate at each position)
+                     tree=False, top_k=3,
+                     # 2b: Adaptive draft length
+                     adaptive=False, l_d_min=1, l_d_max=8,
+                     entropy_threshold=2.0):
     """PyramidSD speculative decoding.
 
     mode="fuzzy"    — original fuzzy acceptance (tau_q / tau_t thresholds).
     mode="lossless" — Leviathan et al. 2023 rejection sampling; output
                       distribution is identical to baseline greedy; tau_q /
                       tau_t are ignored.
+
+    tree=True       — record top-k draft candidates at each position; on
+                      rejection, try alternatives before falling back to the
+                      qualifier's own prediction. (Multi-candidate, not full
+                      tree attention — MLX models don't expose mask API.)
+
+    adaptive=True   — dynamically adjust draft length based on entropy.
+                      Stop drafting early when model is uncertain (entropy >
+                      entropy_threshold), extend up to l_d_max when confident.
+                      l_d parameter becomes the default/starting length.
     """
     prompt_ids = mx.array([tokenizer.encode(prompt)])
 
@@ -103,6 +126,8 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
     mx.eval()
 
     d_proposed = d_accepted = q_proposed = q_accepted = 0
+    tree_saves = 0        # times a tree alternative was used instead of qualifier fallback
+    draft_lengths = []    # actual draft lengths per inner iteration (adaptive tracking)
     output_ids = []
     t0 = time.perf_counter()
 
@@ -123,31 +148,56 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
         while len(q_buffer) < l_q and len(output_ids) + len(q_buffer) < max_tokens:
             draft_toks    = []
             d_logits_vecs = []
+            # 2a: store top-k alternatives at each draft position
+            alternatives  = []   # list of lists of (tok_id, prob) tuples
             cur_logits    = draft_next_logits
 
-            # Autoregressive draft: l_d single-token passes, cache advances l_d.
-            for _ in range(l_d):
+            # Determine effective draft length for this iteration
+            effective_l_d = l_d_max if adaptive else l_d
+
+            # Autoregressive draft with optional adaptive stopping + tree recording.
+            for step in range(effective_l_d):
+                # 2b: adaptive early stop — check entropy before committing
+                if adaptive and step >= l_d_min:
+                    ent = _compute_entropy(cur_logits)
+                    if ent > entropy_threshold:
+                        break  # uncertain — stop drafting
+
                 tok_id = mx.argmax(cur_logits).item()
                 draft_toks.append(tok_id)
                 d_logits_vecs.append(cur_logits)
+
+                # 2a: record top-k alternatives at this position
+                if tree:
+                    probs32 = mx.softmax(cur_logits.astype(mx.float32))
+                    top_indices = mx.argpartition(
+                        -probs32, kth=min(top_k, probs32.shape[0]) - 1
+                    )[:top_k]
+                    alts = [(idx.item(), probs32[idx].item())
+                            for idx in top_indices]
+                    alts.sort(key=lambda x: -x[1])
+                    alternatives.append(alts)
+
                 out = d_model(mx.array([[tok_id]]), cache=d_cache)
                 cur_logits = out[0, -1, :]
-            # d_cache: +l_d  |  cur_logits: logit for position after last draft tok
-            d_proposed += l_d
 
-            # Qualifier verifies all l_d candidates in one batched pass.
-            # q_logits[0, i, :] = qualifier's distribution AFTER seeing draft_toks[i],
-            # i.e., it predicts position i+1. To assess draft_toks[i] we use
-            # q_logits[0, i-1, :] for i>0, and q_next_logits for i=0.
+            actual_l_d = len(draft_toks)
+            if actual_l_d == 0:
+                break  # adaptive stopped immediately (very uncertain)
+            draft_lengths.append(actual_l_d)
+            # d_cache: +actual_l_d  |  cur_logits: logit for position after last draft tok
+            d_proposed += actual_l_d
+
+            # Qualifier verifies all actual_l_d candidates in one batched pass.
             q_logits = q_model(mx.array([draft_toks]), cache=q_cache)
             mx.eval(q_logits)
-            # q_cache: +l_d
+            # q_cache: +actual_l_d
 
             # Accept / reject each draft token.
             n_acc    = 0
             has_repl = False
             repl     = None
-            for i in range(l_d):
+            for i in range(actual_l_d):
                 q_p = q_next_logits if i == 0 else mx.softmax(q_logits[0, i - 1, :])
                 d_p = mx.softmax(d_logits_vecs[i])
                 tok = draft_toks[i]
@@ -163,13 +213,32 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
                     q_probs_buf.append(q_p)
                     n_acc += 1
                 else:
-                    if mode == "fuzzy":
-                        repl = mx.argmax(q_p).item()
-                    else:  # resample from max(0, q - p) normalised
-                        v = min(q_p.shape[0], d_p.shape[0])
-                        adjusted = mx.maximum(q_p[:v] - d_p[:v], 0)
-                        s = adjusted.sum().item()
-                        repl = _sample_categorical(adjusted / s if s > 1e-10 else q_p[:v])
+                    # 2a: Try tree alternatives before falling back to qualifier
+                    alt_found = False
+                    if tree and alternatives:
+                        for alt_id, _alt_prob in alternatives[i]:
+                            if alt_id == tok:
+                                continue  # skip greedy (already rejected)
+                            if mode == "fuzzy":
+                                alt_accept = abs(q_p[alt_id].item() - d_p[alt_id].item()) <= tau_q
+                            else:
+                                ratio_alt = q_p[alt_id].item() / max(d_p[alt_id].item(), 1e-10)
+                                alt_accept = random.random() < min(1.0, ratio_alt)
+                            if alt_accept:
+                                repl = alt_id
+                                alt_found = True
+                                tree_saves += 1
+                                break
+
+                    if not alt_found:
+                        if mode == "fuzzy":
+                            repl = mx.argmax(q_p).item()
+                        else:  # resample from max(0, q - p) normalised
+                            v = min(q_p.shape[0], d_p.shape[0])
+                            adjusted = mx.maximum(q_p[:v] - d_p[:v], 0)
+                            s = adjusted.sum().item()
+                            repl = _sample_categorical(adjusted / s if s > 1e-10 else q_p[:v])
+
                     q_buffer.append(repl)
                     q_probs_buf.append(q_p)
                     has_repl = True
@@ -177,7 +246,7 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
 
             d_accepted  += n_acc
             tokens_kept  = n_acc + (1 if has_repl else 0)
-            trim_amount  = l_d - tokens_kept
+            trim_amount  = actual_l_d - tokens_kept
 
             if has_repl:
                 # Roll back d_cache past rejected drafts and the wrong draft at
@@ -202,9 +271,9 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
                 trim_cache(q_cache, trim_amount)   # no-op
                 # q_logits[0, l_d-1, :] is qualifier's distribution after the last
                 # accepted token, i.e., its prediction for the next position.
-                q_next_logits = mx.softmax(q_logits[0, l_d - 1, :])
+                q_next_logits = mx.softmax(q_logits[0, actual_l_d - 1, :])
 
-            del q_logits, d_logits_vecs, out
+            del q_logits, d_logits_vecs, alternatives, out
             mx.eval()
 
         if not q_buffer:
@@ -287,12 +356,23 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
     elapsed = time.perf_counter() - t0
     n_tok   = len(output_ids)
     tok_s   = n_tok / elapsed if elapsed > 0 else 0
+    tag = mode
+    if tree:
+        tag += "+tree"
+    if adaptive:
+        tag += "+adaptive"
+    avg_draft_len = sum(draft_lengths) / max(1, len(draft_lengths))
+
     if verbose:
-        print(f"\n[Stats/{mode}] {n_tok} tokens | {elapsed:.1f}s | {tok_s:.1f} tok/s")
+        print(f"\n[Stats/{tag}] {n_tok} tokens | {elapsed:.1f}s | {tok_s:.1f} tok/s")
         print(f"  Draft:     {d_accepted}/{d_proposed} accepted "
               f"({100*d_accepted/max(1,d_proposed):.0f}%)")
         print(f"  Qualifier: {q_accepted}/{q_proposed} accepted "
               f"({100*q_accepted/max(1,q_proposed):.0f}%)")
+        if tree:
+            print(f"  Tree saves: {tree_saves} (alternatives accepted instead of qualifier fallback)")
+        if adaptive:
+            print(f"  Avg draft length: {avg_draft_len:.1f} (min={min(draft_lengths, default=0)}, max={max(draft_lengths, default=0)})")
     return {
         "text": tokenizer.decode(output_ids),
         "tokens": output_ids,
@@ -301,11 +381,25 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
         "elapsed": elapsed,
         "d_accept_rate": d_accepted / max(1, d_proposed),
         "q_accept_rate": q_accepted / max(1, q_proposed),
+        "tree_saves": tree_saves,
+        "avg_draft_len": avg_draft_len,
+        "draft_lengths": draft_lengths,
     }
 
 
 if __name__ == "__main__":
+    import sys
     d, q, t, tok = load_models()
     print(f"Loaded. Peak mem: {mx.get_peak_memory()/1e9:.2f}GB")
-    result = generate_pyramid(d, q, t, tok, "What is a hash table?", max_tokens=150)
-    print(result["text"])
+
+    prompt = sys.argv[1] if len(sys.argv) > 1 else "What is a hash table?"
+
+    print("\n=== Chain (original) ===")
+    r1 = generate_pyramid(d, q, t, tok, prompt, max_tokens=150)
+    print(r1["text"])
+
+    print("\n=== Tree + Adaptive ===")
+    r2 = generate_pyramid(d, q, t, tok, prompt, max_tokens=150,
+                          tree=True, top_k=3, adaptive=True,
+                          l_d_min=1, l_d_max=8, entropy_threshold=2.0)
+    print(r2["text"])
