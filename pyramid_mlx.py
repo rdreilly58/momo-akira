@@ -7,6 +7,7 @@ draft_next_logits so every verifier comparison uses the distribution BEFORE
 the token being assessed (not after), eliminating the off-by-one bug.
 """
 import time
+import random
 import mlx.core as mx
 from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache
@@ -26,8 +27,58 @@ def trim_cache(cache, n):
             layer.trim(n)
 
 
+def _sample_categorical(probs):
+    """Sample a token index from a probability distribution via gumbel-max trick."""
+    log_probs = mx.log(mx.maximum(probs, 1e-10))
+    uniform = mx.random.uniform(shape=log_probs.shape)
+    gumbel = -mx.log(-mx.log(mx.maximum(uniform, 1e-10)))
+    return mx.argmax(log_probs + gumbel).item()
+
+
+def generate_baseline(t_model, tokenizer, prompt, max_tokens=100, verbose=True):
+    """Autoregressive generation with the 7B target model (greedy)."""
+    prompt_ids = mx.array([tokenizer.encode(prompt)])
+    cache = make_prompt_cache(t_model)
+    logits = t_model(prompt_ids, cache=cache)
+    mx.eval(cache[0].keys)
+
+    cur_logits = logits[0, -1, :]
+    output_ids = []
+    t0 = time.perf_counter()
+
+    while len(output_ids) < max_tokens:
+        tok_id = mx.argmax(cur_logits).item()
+        output_ids.append(tok_id)
+        if tok_id == tokenizer.eos_token_id:
+            break
+        out = t_model(mx.array([[tok_id]]), cache=cache)
+        cur_logits = out[0, -1, :]
+        mx.eval(cur_logits)
+
+    elapsed = time.perf_counter() - t0
+    n_tok = len(output_ids)
+    tok_s = n_tok / elapsed if elapsed > 0 else 0
+    if verbose:
+        print(f"\n[Baseline] {n_tok} tokens | {elapsed:.1f}s | {tok_s:.1f} tok/s")
+    return {
+        "text": tokenizer.decode(output_ids),
+        "tokens": output_ids,
+        "tok_s": tok_s,
+        "n_tokens": n_tok,
+        "elapsed": elapsed,
+    }
+
+
 def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
-                     max_tokens=100, l_d=3, l_q=6, tau_q=0.3, tau_t=0.4):
+                     max_tokens=100, l_d=3, l_q=6, tau_q=0.3, tau_t=0.4,
+                     mode="fuzzy", verbose=True):
+    """PyramidSD speculative decoding.
+
+    mode="fuzzy"    — original fuzzy acceptance (tau_q / tau_t thresholds).
+    mode="lossless" — Leviathan et al. 2023 rejection sampling; output
+                      distribution is identical to baseline greedy; tau_q /
+                      tau_t are ignored.
+    """
     prompt_ids = mx.array([tokenizer.encode(prompt)])
 
     # ── Prime all three caches with the prompt ────────────────────────────────
@@ -99,12 +150,26 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
             for i in range(l_d):
                 q_p = q_next_logits if i == 0 else mx.softmax(q_logits[0, i - 1, :])
                 d_p = mx.softmax(d_logits_vecs[i])
-                if abs(q_p[draft_toks[i]].item() - d_p[draft_toks[i]].item()) <= tau_q:
-                    q_buffer.append(draft_toks[i])
+                tok = draft_toks[i]
+
+                if mode == "fuzzy":
+                    stage1_accept = abs(q_p[tok].item() - d_p[tok].item()) <= tau_q
+                else:  # lossless: Leviathan et al. rejection sampling
+                    ratio = q_p[tok].item() / max(d_p[tok].item(), 1e-10)
+                    stage1_accept = random.random() < min(1.0, ratio)
+
+                if stage1_accept:
+                    q_buffer.append(tok)
                     q_probs_buf.append(q_p)
                     n_acc += 1
                 else:
-                    repl = mx.argmax(q_p).item()
+                    if mode == "fuzzy":
+                        repl = mx.argmax(q_p).item()
+                    else:  # resample from max(0, q - p) normalised
+                        v = min(q_p.shape[0], d_p.shape[0])
+                        adjusted = mx.maximum(q_p[:v] - d_p[:v], 0)
+                        s = adjusted.sum().item()
+                        repl = _sample_categorical(adjusted / s if s > 1e-10 else q_p[:v])
                     q_buffer.append(repl)
                     q_probs_buf.append(q_p)
                     has_repl = True
@@ -159,10 +224,24 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
         for i in range(len(q_buffer)):
             t_p = t_next_logits if i == 0 else mx.softmax(t_logits[0, i - 1, :])
             q_p = q_probs_buf[i]
-            if abs(t_p[q_buffer[i]].item() - q_p[q_buffer[i]].item()) <= tau_t:
-                final.append(q_buffer[i])
+            tok = q_buffer[i]
+
+            if mode == "fuzzy":
+                stage2_accept = abs(t_p[tok].item() - q_p[tok].item()) <= tau_t
+            else:  # lossless
+                ratio = t_p[tok].item() / max(q_p[tok].item(), 1e-10)
+                stage2_accept = random.random() < min(1.0, ratio)
+
+            if stage2_accept:
+                final.append(tok)
             else:
-                repl_t = mx.argmax(t_p).item()
+                if mode == "fuzzy":
+                    repl_t = mx.argmax(t_p).item()
+                else:  # resample from max(0, t - q) normalised
+                    v = min(t_p.shape[0], q_p.shape[0])
+                    adjusted = mx.maximum(t_p[:v] - q_p[:v], 0)
+                    s = adjusted.sum().item()
+                    repl_t = _sample_categorical(adjusted / s if s > 1e-10 else t_p[:v])
                 final.append(repl_t)
                 break
 
@@ -207,16 +286,26 @@ def generate_pyramid(d_model, q_model, t_model, tokenizer, prompt,
 
     elapsed = time.perf_counter() - t0
     n_tok   = len(output_ids)
-    print(f"\n[Stats] {n_tok} tokens | {elapsed:.1f}s | {n_tok/elapsed:.1f} tok/s")
-    print(f"  Draft:     {d_accepted}/{d_proposed} accepted "
-          f"({100*d_accepted/max(1,d_proposed):.0f}%)")
-    print(f"  Qualifier: {q_accepted}/{q_proposed} accepted "
-          f"({100*q_accepted/max(1,q_proposed):.0f}%)")
-    return tokenizer.decode(output_ids)
+    tok_s   = n_tok / elapsed if elapsed > 0 else 0
+    if verbose:
+        print(f"\n[Stats/{mode}] {n_tok} tokens | {elapsed:.1f}s | {tok_s:.1f} tok/s")
+        print(f"  Draft:     {d_accepted}/{d_proposed} accepted "
+              f"({100*d_accepted/max(1,d_proposed):.0f}%)")
+        print(f"  Qualifier: {q_accepted}/{q_proposed} accepted "
+              f"({100*q_accepted/max(1,q_proposed):.0f}%)")
+    return {
+        "text": tokenizer.decode(output_ids),
+        "tokens": output_ids,
+        "tok_s": tok_s,
+        "n_tokens": n_tok,
+        "elapsed": elapsed,
+        "d_accept_rate": d_accepted / max(1, d_proposed),
+        "q_accept_rate": q_accepted / max(1, q_proposed),
+    }
 
 
 if __name__ == "__main__":
     d, q, t, tok = load_models()
     print(f"Loaded. Peak mem: {mx.get_peak_memory()/1e9:.2f}GB")
-    out = generate_pyramid(d, q, t, tok, "What is a hash table?", max_tokens=150)
-    print(out)
+    result = generate_pyramid(d, q, t, tok, "What is a hash table?", max_tokens=150)
+    print(result["text"])
