@@ -188,7 +188,7 @@ def process_sharegpt_for_qwen(example, tokenizer, max_length=2048):
 # ── Trainer ───────────────────────────────────────────────────────────────────
 
 class ReDrafterTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         next_n = self.args.drafter_predict_n_tokens
         logits = model(
             input_ids=inputs["input_ids"],
