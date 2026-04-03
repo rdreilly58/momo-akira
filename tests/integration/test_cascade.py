@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.pipeline import AcceptedTier, CascadePipeline
-from openclaw_speculative_decoder.config import AppConfig
-from openclaw_speculative_decoder.models.base import LLMResponse
+from momo_akira.cascade.pipeline import AcceptedTier, CascadePipeline
+from momo_akira.config import AppConfig
+from momo_akira.models.base import LLMResponse
 
 
 def _make_response(
@@ -55,7 +55,7 @@ def pipeline_with_mocks(app_config: AppConfig):
     mock_qualifier = AsyncMock()
     mock_target = AsyncMock()
 
-    with patch("openclaw_speculative_decoder.cascade.pipeline.ProviderFactory"):
+    with patch("momo_akira.cascade.pipeline.ProviderFactory"):
         pipeline = CascadePipeline(app_config)
 
     # Replace providers directly
@@ -230,7 +230,7 @@ class TestCascadePSDF:
         mock_qualifier = AsyncMock()
         mock_target = AsyncMock()
 
-        with patch("openclaw_speculative_decoder.cascade.pipeline.ProviderFactory"):
+        with patch("momo_akira.cascade.pipeline.ProviderFactory"):
             pipeline = CascadePipeline(psdf_config)
 
         pipeline._providers["draft"] = mock_draft

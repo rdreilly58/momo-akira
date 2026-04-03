@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.pipeline import AcceptedTier, CascadeResult
-from openclaw_speculative_decoder.metrics import MetricsCollector
-from openclaw_speculative_decoder.models.base import LLMResponse
+from momo_akira.cascade.pipeline import AcceptedTier, CascadeResult
+from momo_akira.metrics import MetricsCollector
+from momo_akira.models.base import LLMResponse
 
 
 def _make_result(

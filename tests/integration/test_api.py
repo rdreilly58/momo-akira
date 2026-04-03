@@ -12,10 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 
-from openclaw_speculative_decoder.cascade.pipeline import AcceptedTier, CascadeResult
-from openclaw_speculative_decoder.config import AppConfig
-from openclaw_speculative_decoder.models.base import LLMResponse
-from openclaw_speculative_decoder.server import app
+from momo_akira.cascade.pipeline import AcceptedTier, CascadeResult
+from momo_akira.config import AppConfig
+from momo_akira.models.base import LLMResponse
+from momo_akira.server import app
 
 
 def _make_cascade_result(content: str = "Test response") -> CascadeResult:
@@ -56,7 +56,7 @@ def mock_app_state(app_config: AppConfig):
     mock_logger = MagicMock()
     mock_logger.log_request = MagicMock()
 
-    from openclaw_speculative_decoder import server
+    from momo_akira import server
 
     old_config = server._state.config
     old_pipeline = server._state.pipeline
@@ -66,7 +66,7 @@ def mock_app_state(app_config: AppConfig):
     server._state.config = app_config
     server._state.pipeline = mock_pipeline
     server._state.logger = mock_logger
-    from openclaw_speculative_decoder.metrics import MetricsCollector
+    from momo_akira.metrics import MetricsCollector
 
     server._state.metrics = MetricsCollector()
 

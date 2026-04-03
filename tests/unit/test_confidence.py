@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.confidence import ConfidenceScore, score_response
-from openclaw_speculative_decoder.config import ConfidenceConfig
+from momo_akira.cascade.confidence import ConfidenceScore, score_response
+from momo_akira.config import ConfidenceConfig
 
 
 @pytest.fixture

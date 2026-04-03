@@ -1,4 +1,4 @@
-# openclaw-speculative-decoder configuration
+# momo-akira configuration
 # This file is the SINGLE SOURCE OF TRUTH for model selection.
 # Swap any model by changing its model_id here — zero code changes required.
 

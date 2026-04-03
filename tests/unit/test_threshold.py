@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.threshold import AdaptiveThresholdController
-from openclaw_speculative_decoder.config import AdaptiveThresholdConfig
+from momo_akira.cascade.threshold import AdaptiveThresholdController
+from momo_akira.config import AdaptiveThresholdConfig
 
 
 @pytest.fixture

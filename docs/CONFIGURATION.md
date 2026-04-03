@@ -1,8 +1,8 @@
-# Configuration Reference: OpenClaw Speculative Decoder
+# Configuration Reference: Momo-Akira
 
 This document is the complete reference for `config.yaml`. Every option is documented with its type, default value, valid range, and effect on system behavior.
 
-Configuration is loaded at startup by `src/openclaw_speculative_decoder/config.py`. Environment variables override `config.yaml` values using the mapping described in the [Environment Variable Overrides](#environment-variable-overrides) section.
+Configuration is loaded at startup by `src/momo_akira/config.py`. Environment variables override `config.yaml` values using the mapping described in the [Environment Variable Overrides](#environment-variable-overrides) section.
 
 ---
 
@@ -10,7 +10,7 @@ Configuration is loaded at startup by `src/openclaw_speculative_decoder/config.p
 
 ```yaml
 # =============================================================================
-# OpenClaw Speculative Decoder — config.yaml
+# Momo-Akira — config.yaml
 # =============================================================================
 
 # -----------------------------------------------------------------------------

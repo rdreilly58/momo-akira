@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.pipeline import CascadePipeline
-from openclaw_speculative_decoder.config import (
+from momo_akira.cascade.pipeline import CascadePipeline
+from momo_akira.config import (
     AdaptiveThresholdConfig,
     AppConfig,
     CascadeConfig,
@@ -19,7 +19,7 @@ from openclaw_speculative_decoder.config import (
     ProvidersConfig,
     ServerConfig,
 )
-from openclaw_speculative_decoder.models.base import LLMResponse
+from momo_akira.models.base import LLMResponse
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ FAILED_RESPONSE = _make_response("", success=False)
 @pytest.fixture
 def mock_pipeline(app_config: AppConfig):
     """CascadePipeline with all providers mocked out."""
-    with patch("openclaw_speculative_decoder.cascade.pipeline.ProviderFactory") as mock_factory:
+    with patch("momo_akira.cascade.pipeline.ProviderFactory") as mock_factory:
         mock_draft_provider = AsyncMock()
         mock_qualifier_provider = AsyncMock()
         mock_target_provider = AsyncMock()

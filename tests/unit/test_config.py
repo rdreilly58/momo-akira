@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from openclaw_speculative_decoder.config import AppConfig, CascadeConfig, load_config
+from momo_akira.config import AppConfig, CascadeConfig, load_config
 
 
 def write_config(tmp_path: Path, data: dict) -> Path:

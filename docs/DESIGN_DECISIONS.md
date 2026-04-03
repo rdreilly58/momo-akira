@@ -1,4 +1,4 @@
-# Design Decisions: OpenClaw Speculative Decoder
+# Design Decisions: Momo-Akira
 
 This document captures the rationale behind every major design decision in OpenClaw. Where a decision is grounded in the PyramidSD paper (arxiv:2510.12966, NeurIPS 2025), the relevant section is cited.
 

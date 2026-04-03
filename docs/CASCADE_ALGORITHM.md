@@ -1,4 +1,4 @@
-# Cascade Algorithm: OpenClaw Speculative Decoder
+# Cascade Algorithm: Momo-Akira
 
 This document provides a complete technical description of the speculative decoding cascade, including pseudocode for both variants, the confidence scoring algorithm, divergence measure adaptations, the threshold adaptation algorithm, and edge case handling.
 

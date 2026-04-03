@@ -25,7 +25,7 @@ test-integration:
 	pytest tests/integration/ -v
 
 test-cov:
-	pytest --cov=src/openclaw_speculative_decoder --cov-report=html
+	pytest --cov=src/momo_akira --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
 
 # ---------------------------------------------------------------------------
@@ -48,10 +48,10 @@ check: lint typecheck
 # ---------------------------------------------------------------------------
 
 run:
-	openclaw-decoder --config config.yaml
+	momo-akira --config config.yaml
 
 run-dev:
-	openclaw-decoder --config config.yaml --reload --log-level debug
+	momo-akira --config config.yaml --reload --log-level debug
 
 # ---------------------------------------------------------------------------
 # Cleanup

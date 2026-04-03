@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openclaw-speculative-decoder"
+name = "momo-akira"
 version = "0.1.0"
 description = "OpenAI-compatible proxy implementing PyramidSD 3-tier speculative decoding"
 readme = "README.md"
@@ -38,10 +38,10 @@ dev = [
 ]
 
 [project.scripts]
-openclaw-decoder = "openclaw_speculative_decoder.cli:main"
+momo-akira = "momo_akira.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/openclaw_speculative_decoder"]
+packages = ["src/momo_akira"]
 
 [tool.ruff]
 line-length = 100
@@ -59,8 +59,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=src/openclaw_speculative_decoder --cov-report=term-missing -v"
+addopts = "--cov=src/momo_akira --cov-report=term-missing -v"
 
 [tool.coverage.run]
-source = ["src/openclaw_speculative_decoder"]
+source = ["src/momo_akira"]
 omit = ["*/tests/*"]

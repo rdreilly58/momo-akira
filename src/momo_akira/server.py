@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="openclaw-speculative-decoder",
+    title="momo-akira",
     description="OpenAI-compatible proxy with PyramidSD 3-tier speculative decoding",
     version="0.1.0",
     lifespan=lifespan,

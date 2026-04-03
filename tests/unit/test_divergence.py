@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from openclaw_speculative_decoder.cascade.divergence import (
+from momo_akira.cascade.divergence import (
     composite_divergence,
     logprob_divergence,
     prompt_complexity_score,

@@ -1,8 +1,8 @@
-# Architecture: OpenClaw Speculative Decoder
+# Architecture: Momo-Akira
 
 ## Overview
 
-OpenClaw Speculative Decoder is a production-ready OpenAI-compatible proxy that implements PyramidSD-style 3-tier speculative decoding for API-based LLM inference. It sits transparently between your application and upstream LLM providers, routing each request through the cheapest capable model tier while preserving response quality.
+Momo-Akira is a production-ready OpenAI-compatible proxy that implements PyramidSD-style 3-tier speculative decoding for API-based LLM inference. It sits transparently between your application and upstream LLM providers, routing each request through the cheapest capable model tier while preserving response quality.
 
 The system is adapted from the PyramidSD paper (arxiv:2510.12966, NeurIPS 2025). The key insight is that a large fraction of real-world queries are simple enough to be answered confidently by smaller, faster models. By measuring response confidence at each tier and only escalating when confidence is insufficient, the proxy dramatically reduces cost and latency on the majority of requests without degrading quality on complex ones.
 
@@ -101,7 +101,7 @@ Thresholds satisfy `tau_Q <= tau_T` (from paper Section 4), meaning the qualifie
 ## Component Diagram
 
 ```
-src/openclaw_speculative_decoder/
+src/momo_akira/
 │
 ├── server.py
 │   └── FastAPI application, route definitions, request/response shaping

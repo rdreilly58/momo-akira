@@ -1,4 +1,4 @@
-# API Reference: OpenClaw Speculative Decoder
+# API Reference: Momo-Akira
 
 The OpenClaw proxy exposes an OpenAI-compatible HTTP API on `localhost:7780` by default. Any client that works with the OpenAI SDK or the Chat Completions REST API will work with OpenClaw without modification.
 

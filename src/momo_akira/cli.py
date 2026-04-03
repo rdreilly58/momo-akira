@@ -19,7 +19,7 @@ def main(
     log_level: str | None,
     reload: bool,
 ) -> None:
-    """Start the openclaw speculative decoder proxy."""
+    """Start the momo-akira proxy."""
     import os
 
     if config:
@@ -33,7 +33,7 @@ def main(
     server_port = port or cfg.server.port
     server_log_level = log_level or cfg.server.log_level
 
-    click.echo(f"Starting openclaw-speculative-decoder on {server_host}:{server_port}")
+    click.echo(f"Starting momo-akira on {server_host}:{server_port}")
     click.echo(f"Cascade variant: {cfg.cascade.variant}")
     click.echo(f"  Draft:     {cfg.models.draft.model_id} ({cfg.models.draft.provider})")
     click.echo(f"  Qualifier: {cfg.models.qualifier.model_id} ({cfg.models.qualifier.provider})")
@@ -41,7 +41,7 @@ def main(
     click.echo(f"  tau_Q={cfg.cascade.tau_q}, tau_T={cfg.cascade.tau_t}")
 
     uvicorn.run(
-        "openclaw_speculative_decoder.server:app",
+        "momo_akira.server:app",
         host=server_host,
         port=server_port,
         log_level=server_log_level,

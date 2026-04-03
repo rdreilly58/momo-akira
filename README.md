@@ -1,4 +1,4 @@
-# openclaw-speculative-decoder
+# momo-akira
 
 An OpenAI-compatible proxy that implements **PyramidSD-style 3-tier speculative decoding** for API-based LLMs. Inspired by the paper [PyramidSD (arxiv:2510.12966, NeurIPS 2025)](https://arxiv.org/abs/2510.12966).
 
@@ -24,7 +24,7 @@ cp .env.example .env
 # Edit .env with your ANTHROPIC_API_KEY (and/or OPENAI_API_KEY, OPENROUTER_API_KEY)
 
 # 3. Start the proxy
-openclaw-decoder --config config.yaml
+momo-akira --config config.yaml
 # Listening on http://127.0.0.1:7780
 
 # 4. Use it exactly like the OpenAI API
