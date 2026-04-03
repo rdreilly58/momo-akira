@@ -1,134 +1,85 @@
-# momo-akira
+# momo-akira v2
 
-An OpenAI-compatible proxy that implements **PyramidSD-style 3-tier speculative decoding** for API-based LLMs. Inspired by the paper [PyramidSD (arxiv:2510.12966, NeurIPS 2025)](https://arxiv.org/abs/2510.12966).
+OpenAI-compatible local inference server implementing PyramidSD — token-level
+3-tier speculative decoding (arxiv:2510.12966).
 
-Instead of sending every request to an expensive model, the proxy routes through a cascade:
-
-```
-Request → Draft (Haiku) → Qualifier (Sonnet) → Target (Opus)
-                ↓                   ↓                ↓
-           Accept if              Accept if       Always
-           confident              confident       accept
-```
-
-Cheap requests resolve at the draft tier. Hard requests escalate only as far as needed. You get target-quality answers where it matters, at a fraction of the cost.
+A 7B target model serving tokens at ~2x speed by using a 0.5B draft and a 3B
+qualifier to speculate ahead, both verified in parallel.
 
 ## Quickstart
 
 ```bash
-# 1. Install
+# Install
 pip install -e ".[dev]"
 
-# 2. Configure API keys
-cp .env.example .env
-# Edit .env with your ANTHROPIC_API_KEY (and/or OPENAI_API_KEY, OPENROUTER_API_KEY)
-
-# 3. Start the proxy
+# Start server (models are downloaded from HuggingFace on first run)
 momo-akira --config config.yaml
-# Listening on http://127.0.0.1:7780
+```
 
-# 4. Use it exactly like the OpenAI API
+Server starts on `http://127.0.0.1:7780`.
+
+## Usage
+
+```bash
 curl http://127.0.0.1:7780/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "cascade",
-    "messages": [{"role": "user", "content": "What is the capital of France?"}]
+    "model": "momo-akira",
+    "messages": [{"role": "user", "content": "What is speculative decoding?"}]
   }'
 ```
 
-## Response example
+Response includes a `cascade_info` field with per-request metrics:
 
 ```json
 {
-  "id": "chatcmpl-abc123",
-  "object": "chat.completion",
-  "model": "cascade/draft",
-  "choices": [{
-    "message": {"role": "assistant", "content": "Paris is the capital of France."},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23},
   "cascade_info": {
-    "accepted_tier": "draft",
-    "variant": "psda",
-    "tiers_invoked": {"draft": true, "qualifier": false, "target": false},
-    "confidence": {"draft": 0.82, "qualifier": null},
-    "cost_usd": 0.000009,
-    "latency_ms": 412.3
+    "tokens_per_second": 47.3,
+    "draft_acceptance_rate": 0.71,
+    "qualifier_acceptance_rate": 0.83,
+    "stage1_iterations": 12,
+    "outer_iterations": 4,
+    "adaptive_tau_q": 0.31,
+    "adaptive_tau_t": 0.40
   }
 }
 ```
 
-## Swapping models
+## How It Works
 
-Open `config.yaml` and change the model — no code changes required:
+1. **Draft (0.5B)** proposes `l_D` tokens sequentially (fast, cheap)
+2. **Qualifier (3B)** verifies all `l_D` in one forward pass
+   — accepts tokens where `|logit_D - logit_Q| ≤ τ_Q`
+3. Once `l_Q` qualifier-verified tokens accumulate, **Target (7B)** verifies
+   them all in one forward pass — accepts where `|logit_Q - logit_T| ≤ τ_T`
+4. Final accepted tokens are output; KV caches are committed on acceptance,
+   rolled back on rejection.
 
-```yaml
-models:
-  draft:
-    model_id: "gpt-4o-mini"    # was claude-haiku
-    provider: "openai"          # was anthropic
-  qualifier:
-    model_id: "gpt-4o"
-    provider: "openai"
-  target:
-    model_id: "claude-opus-4-6"
-    provider: "anthropic"
-```
+The speedup comes from verifying K tokens in the time it takes to generate 1.
 
-Restart and it works.
+See [docs/ALGORITHM.md](docs/ALGORITHM.md) for the full walkthrough.
 
 ## Configuration
 
-Key settings in `config.yaml`:
+Edit `config.yaml`. All three models **must share the same tokenizer family**.
 
-```yaml
-cascade:
-  variant: "psda"   # psda (stable) or psdf (faster, more variance)
-  tau_q: 0.35       # draft acceptance threshold — lower = more drafts accepted
-  tau_t: 0.50       # qualifier acceptance threshold
-```
+Default: `Qwen/Qwen2.5-0.5B-Instruct` / `3B` / `7B-Instruct`
+(auto-downloaded from HuggingFace).
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
-
-## Algorithm
-
-Adapted from PyramidSD (paper Section 3):
-
-1. **Draft** generates a response. A composite confidence score `C ∈ [0,1]` is computed (prompt complexity + response coherence + optional logprobs).
-2. If `C >= tau_Q` → accept the draft response (done, cheap).
-3. **Qualifier** generates a response (PSDA) or evaluates the draft (PSDF).
-4. If `C >= tau_T` → accept the qualifier response (done, moderate cost).
-5. **Target** generates the final response (expensive, highest quality).
-
-The paper's key insight: `tau_Q <= tau_T` works best — be strict at the first gate, more lenient at the final gate.
-
-See [docs/CASCADE_ALGORITHM.md](docs/CASCADE_ALGORITHM.md) for full details.
-
-## Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Main inference (OpenAI compatible) |
-| `GET` | `/health` | Health check + current config |
-| `GET` | `/v1/metrics` | Cost, acceptance rates, threshold stats |
-| `GET` | `/v1/models` | Available models |
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all options.
 
 ## Development
 
 ```bash
-make dev        # Install with dev dependencies + pre-commit hooks
-make test       # Run full test suite
-make test-unit  # Unit tests only
-make lint       # Ruff lint
+make dev        # install with dev deps + pre-commit
+make test       # run test suite
+make lint       # ruff check
 make typecheck  # mypy
-make fmt        # Auto-format
 ```
 
-## Docs
+## Requirements
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Design Decisions](docs/DESIGN_DECISIONS.md)
-- [Cascade Algorithm](docs/CASCADE_ALGORITHM.md)
-- [Configuration Reference](docs/CONFIGURATION.md)
-- [API Reference](docs/API_REFERENCE.md)
+- Python 3.11+
+- PyTorch 2.2+ (MPS / CUDA / CPU)
+- ~8 GB RAM/VRAM for all three models in float16
+- HuggingFace Transformers 4.45+
